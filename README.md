@@ -11,7 +11,7 @@ This repository sets up a backtest environment for DR/IDR + ORB Forex strategies
    ```
 4. Run the backtest (AlphaVantage example):
    ```bash
-   export ALPHAVANTAGE_API_KEY=YOUR_KEY
+   export ALPHAVANTAGE_API_KEY=2WZRM91BFT2JMAZB
    python backtest.py --from 2023-08-12 --to 2025-08-12 --source alpha
    ```
 5. Output:
