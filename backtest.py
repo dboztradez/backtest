@@ -183,6 +183,9 @@ def ema_on_tf(close: pd.Series, index: pd.DatetimeIndex, tf_minutes: int, length
     df = pd.DataFrame({"close": close}, index=index)
     res = df["close"].resample(f"{tf_minutes}T").last()
     ema_tf = ema(res, length)
+    # Ensure index is a pandas Index, not a Series
+    if not isinstance(index, pd.Index):
+        index = pd.Index(index)
     ema_upsampled = ema_tf.reindex(index.union(ema_tf.index)).ffill().reindex(index).ffill()
     return ema_upsampled
 
