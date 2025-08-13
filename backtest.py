@@ -1,7 +1,22 @@
+# ========== Swing High/Low Utilities ==========
+def most_recent_swing_low(df, i, lookback=20):
+    # Find lowest low in lookback bars before i
+    if i == 0:
+        return df.loc[i, "low"]
+    start = max(0, i - lookback)
+    return df.loc[start:i, "low"].min()
+
+def most_recent_swing_high(df, i, lookback=20):
+    # Find highest high in lookback bars before i
+    if i == 0:
+        return df.loc[i, "high"]
+    start = max(0, i - lookback)
+    return df.loc[start:i, "high"].max()
 #!/usr/bin/env python3
 # backtest.py — EURUSD M5 DR/IDR + ORB hybrid
 # Runs fully in GitHub Codespaces. Outputs CSVs + JSON.
 
+from multiprocessing.util import debug
 import os, sys, json, math, argparse, time as pytime
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -19,13 +34,15 @@ PAIR = "EURUSD"
 RISK_PCT = 1.0               # 1% per trade
 MAX_DAILY_LOSS = 5.0         # 5% daily loss cap
 ADX_LEN = 14
-ADX_MIN = 25.0
+ADX_MIN = 20.0
 VOL_LOOKBACK = 50
 STRONG_BODY_PCT = 60.0
 DR_TRADES_CAP = 4
 ORB_TRADES_CAP = 2
 NEWS_EMBARGO_MIN = 15        # +/- minutes (optional; requires events list)
 ONE_OPEN_AT_A_TIME = True
+USE_FVG_ON_ORB = False  # set True if you want the stricter version
+#REQUIRE_VWAP_ON_DR = True
 
 # ========== Utilities ==========
 def to_et(ts: pd.Timestamp) -> pd.Timestamp:
@@ -132,8 +149,7 @@ def fetch_oanda(from_date: str, to_date: str, instrument="EUR_USD", granularity=
         "price": "M",
         "granularity": granularity,
         "from": from_date + "T00:00:00Z",
-        "to": to_date + "T23:59:59Z",
-        "count": 5000,
+        "to": to_date + "T23:59:59Z"
     }
     r = requests.get(url, headers=headers, params=params, timeout=90)
     r.raise_for_status()
@@ -170,10 +186,14 @@ def adx(df: pd.DataFrame, length=14) -> pd.Series:
     dx = 100 * (abs(pdi - mdi) / (pdi + mdi)).replace([np.inf, -np.inf], 0).fillna(0)
     return dx.ewm(alpha=1/length, adjust=False).mean()
 
-def vwap(df: pd.DataFrame) -> pd.Series:
-    typical = (df["high"] + df["low"] + df["close"]) / 3.0
-    pv = typical * df["volume"].replace(0, np.nan)
-    return (pv.cumsum() / df["volume"].replace(0, np.nan).cumsum()).fillna(method="ffill")
+def session_vwap(df: pd.DataFrame) -> pd.Series:
+    # NY session-anchored cumulative "VWAP" using typical price and count (no volume needed)
+    tp = (df["high"] + df["low"] + df["close"]) / 3.0
+    ny_date = df["time"].dt.tz_convert(NY).dt.date
+    # cumulative sum per NY date
+    num = tp.groupby(ny_date).cumsum()
+    den = pd.Series(1.0, index=df.index).groupby(ny_date).cumsum()
+    return (num / den).rename("VWAP")
 
 def ema(series: pd.Series, length: int) -> pd.Series:
     return series.ewm(span=length, adjust=False).mean()
@@ -201,9 +221,9 @@ def compute_ranges(df: pd.DataFrame) -> pd.DataFrame:
     on_dr1 = on_dr2 = on_orb = False
 
     out = {
-        "DR1_high": [], "DR1_low": [],
-        "DR2_high": [], "DR2_low": [],
-        "ORB_high": [], "ORB_low": []
+        "DR1_high": [], "DR1_low": [], "DR1_span_pips": [],
+        "DR2_high": [], "DR2_low": [], "DR2_span_pips": [],
+        "ORB_high": [], "ORB_low": [], "ORB_span_pips": []
     }
 
     for i, row in df.iterrows():
@@ -236,9 +256,18 @@ def compute_ranges(df: pd.DataFrame) -> pd.DataFrame:
         if on_orb and not in_orb:
             on_orb = False
 
+        # Append DR/ORB boundaries and spans for every row
         out["DR1_high"].append(dr1h); out["DR1_low"].append(dr1l)
         out["DR2_high"].append(dr2h); out["DR2_low"].append(dr2l)
         out["ORB_high"].append(orbh); out["ORB_low"].append(orbl)
+
+        pip = 0.0001
+        dr1_span = (dr1h - dr1l) / pip if not np.isnan(dr1h) and not np.isnan(dr1l) else np.nan
+        dr2_span = (dr2h - dr2l) / pip if not np.isnan(dr2h) and not np.isnan(dr2l) else np.nan
+        orb_span = (orbh - orbl) / pip if not np.isnan(orbh) and not np.isnan(orbl) else np.nan
+        out["DR1_span_pips"].append(dr1_span)
+        out["DR2_span_pips"].append(dr2_span)
+        out["ORB_span_pips"].append(orb_span)
 
     for k, v in out.items():
         df[k] = v
@@ -293,7 +322,8 @@ def run_backtest(df: pd.DataFrame,
     df = compute_ranges(df)
     # Indicators
     df["ADX"] = adx(df, ADX_LEN)
-    df["VWAP"] = vwap(df)
+    # df["VWAP"] = vwap(df)     # remove this
+    df["VWAP"] = session_vwap(df)  # add this
     df["volZ"] = (df["volume"] - df["volume"].rolling(VOL_LOOKBACK).mean()) / df["volume"].rolling(VOL_LOOKBACK).std().replace(0, np.nan)
     df["volZ"] = df["volZ"].fillna(0)
     df["bodyPct"] = np.where(
@@ -301,8 +331,8 @@ def run_backtest(df: pd.DataFrame,
         100.0 * (abs(df["close"] - df["open"]) / (df["high"] - df["low"])),
         0.0
     )
-    # M15 EMA200 bias on M5 bars
-    df["EMA200_M15"] = ema_on_tf(df["close"], df["time"], 15, 200)
+    # M60 EMA200 bias on M60 bars
+    df["EMA200_M60"] = ema_on_tf(df["close"], df["time"], 60, 200)
 
     start_bal = 10_000.0
     balance = start_bal
@@ -376,8 +406,8 @@ def run_backtest(df: pd.DataFrame,
         adx_ok = row["ADX"] >= ADX_MIN
         vwap_long_ok = row["close"] >= row["VWAP"]
         vwap_short_ok = row["close"] <= row["VWAP"]
-        vol_spike = row["volZ"] >= 1.0
-        strong_candle = row["bodyPct"] >= STRONG_BODY_PCT
+        vol_spike = row["volZ"] >= 0.5     # softer; or even skip volume entirely
+        strong_candle = row["bodyPct"] >= (STRONG_BODY_PCT or 60.0)
 
         # ORB range
         orbh, orbl = row["ORB_high"], row["ORB_low"]
@@ -396,30 +426,32 @@ def run_backtest(df: pd.DataFrame,
 
         # ORB (Tue–Thu): breakout w/ EMA200 M15 bias + VWAP align + ADX + strong candle + vol spike
         if active_window == "ORB" and trades_this_window < ORB_TRADES_CAP and (not ONE_OPEN_AT_A_TIME or not open_pos):
-            ema_bias_long = row["close"] >= row["EMA200_M15"]
-            ema_bias_short = row["close"] <= row["EMA200_M15"]
+            ema_bias_long = row["close"] >= row["EMA200_M60"]
+            ema_bias_short = row["close"] <= row["EMA200_M60"]
             broke_up = (pd.notna(orbh) and row["close"] > orbh)
             broke_dn = (pd.notna(orbl) and row["close"] < orbl)
 
             # Allow FVG only after re-entry beyond OR boundary (re-entry proxy: close beyond, and prior bar pierced boundary)
             reentry_long = (pd.notna(orbh) and row["close"] > orbh and df.loc[i, "low"] < orbh)
             reentry_short = (pd.notna(orbl) and row["close"] < orbl and df.loc[i, "high"] > orbl)
-            fvg_allowed_long = reentry_long and fvg_up
-            fvg_allowed_short = reentry_short and fvg_dn
+            fvg_allowed_long  = (not USE_FVG_ON_ORB) or (reentry_long and fvg_up)
+            fvg_allowed_short = (not USE_FVG_ON_ORB) or (reentry_short and fvg_dn)
 
-            if adx_ok and strong_candle and vol_spike:
-                if broke_up and ema_bias_long and vwap_long_ok and fvg_allowed_long:
-                    # simple ORB SL: 10 pips; TP none (let window close force exit)
-                    sl = row["close"] - 0.0010
+            # SOFTEN ORB: Remove volume and VWAP requirements, keep ADX and strong candle
+            if adx_ok and strong_candle:
+                if broke_up and ema_bias_long and fvg_allowed_long:
+                    sl = most_recent_swing_low(df, i)
+                    tp = row["close"] + 1.5 * (row["close"] - sl)
                     units = pos_size(row["close"], sl)
                     if units > 0:
-                        open_pos = Position("ORB", "long", +1, row["time"], row["close"], sl, None, units)
+                        open_pos = Position("ORB", "long", +1, row["time"], row["close"], sl, tp, units)
                         trades_this_window += 1; made_entry = True
-                elif broke_dn and ema_bias_short and vwap_short_ok and fvg_allowed_short:
-                    sl = row["close"] + 0.0010
+                elif broke_dn and ema_bias_short and fvg_allowed_short:
+                    sl = most_recent_swing_high(df, i)
+                    tp = row["close"] - 1.5 * (sl - row["close"])
                     units = pos_size(row["close"], sl)
                     if units > 0:
-                        open_pos = Position("ORB", "short", -1, row["time"], row["close"], sl, None, units)
+                        open_pos = Position("ORB", "short", -1, row["time"], row["close"], sl, tp, units)
                         trades_this_window += 1; made_entry = True
 
         # DR/IDR (Mon/Fri + Tue–Thu morning): bounce at bounds, immediate FVG allowed, SL 5p beyond, TP opposite bound
@@ -427,20 +459,37 @@ def run_backtest(df: pd.DataFrame,
             # choose active DR bounds
             dr_low = dr2l if (active_window == "DRIDR2" and pd.notna(dr2l)) else dr1l
             dr_high = dr2h if (active_window == "DRIDR2" and pd.notna(dr2h)) else dr1h
+            pip = 0.0001
 
             if pd.notna(dr_low) and pd.notna(dr_high) and adx_ok:
                 # long bounce off lower range + VWAP align + simple reversal (close > open)
                 if vwap_long_ok and (row["low"] <= dr_low + 0.00015) and (row["close"] > row["open"]):
-                    sl = dr_low - 0.0005
-                    tp = dr_high
+                    # SL: at least 5 pips or 2 pips below DR low, whichever is greater
+                    min_sl = dr_low - 0.0002
+                    swing_sl = most_recent_swing_low(df, i)
+                    sl = min(swing_sl, min_sl)
+                    if abs(row["close"] - sl) < 0.0005:
+                        sl = row["close"] - 0.0005
+                    # TP: not greater than distance to upper DR
+                    max_tp = dr_high
+                    rr_tp = row["close"] + 1.5 * (row["close"] - sl)
+                    tp = min(rr_tp, max_tp)
                     units = pos_size(row["close"], sl)
                     if units > 0:
                         open_pos = Position(active_window, "long", +1, row["time"], row["close"], sl, tp, units)
                         trades_this_window += 1; made_entry = True
                 # short bounce off upper range + VWAP align + simple reversal (close < open)
                 if (not made_entry) and vwap_short_ok and (row["high"] >= dr_high - 0.00015) and (row["close"] < row["open"]):
-                    sl = dr_high + 0.0005
-                    tp = dr_low
+                    # SL: at least 5 pips or 2 pips above DR high, whichever is greater
+                    min_sl = dr_high + 0.0002
+                    swing_sl = most_recent_swing_high(df, i)
+                    sl = max(swing_sl, min_sl)
+                    if abs(row["close"] - sl) < 0.0005:
+                        sl = row["close"] + 0.0005
+                    # TP: not greater than distance to lower DR
+                    max_tp = dr_low
+                    rr_tp = row["close"] - 1.5 * (sl - row["close"])
+                    tp = max(rr_tp, max_tp)
                     units = pos_size(row["close"], sl)
                     if units > 0:
                         open_pos = Position(active_window, "short", -1, row["time"], row["close"], sl, tp, units)
@@ -539,6 +588,8 @@ def main():
     pd.DataFrame(res["equity"]).to_csv("results/equity_curve.csv", index=False)
     with open("results/backtest_summary.json", "w") as f:
         json.dump(res["summary"], f, indent=2)
+    # Save full DataFrame with DR/ORB boundaries and spans for analysis
+    df.to_csv("results/full_data.csv", index=False)
     print(json.dumps(res["summary"], indent=2))
 
 if __name__ == "__main__":
