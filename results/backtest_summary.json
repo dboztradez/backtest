@@ -1,8 +1,8 @@
 {
   "pair": "EURUSD",
   "start_balance": 10000.0,
-  "end_balance": 10000.0,
-  "net_pnl": 0.0,
-  "return_pct": 0.0,
-  "n_trades": 0
+  "end_balance": 10000.121550334328,
+  "net_pnl": 0.12155033432827622,
+  "return_pct": 0.0012155033432881268,
+  "n_trades": 34
 }
