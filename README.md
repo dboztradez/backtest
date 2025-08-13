@@ -31,3 +31,10 @@ This repository sets up a backtest environment for DR/IDR + ORB Forex strategies
    - `results/equity_curve.csv` → equity over time
 
 Replace `alpha` with `twelve`, `oanda`, or `csv` for other sources.
+
+Force Commit and push:
+
+   ```bash
+   git add backtest.py README.md
+   git commit --allow-empty-message -m "" && git push
+   ```
