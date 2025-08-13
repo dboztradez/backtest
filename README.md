@@ -13,7 +13,7 @@ This repository sets up a backtest environment for DR/IDR + ORB Forex strategies
    pip install -r requirements.txt
    ```
 
-4. Run the backtest (AlphaVantage example):
+4. Run the backtest (AlphaVantage and Twelve Data examples):
 
    ```bash
    export ALPHAVANTAGE_API_KEY=2WZRM91BFT2JMAZB
@@ -23,6 +23,7 @@ This repository sets up a backtest environment for DR/IDR + ORB Forex strategies
    ```bash
    export TWELVEDATA_API_KEY=9889ec672d9046a09967c9628ca64986
    python backtest.py --from 2023-08-12 --to 2025-08-12 --source twelve
+   ```
 
 5. Output:
    - `results/backtest_summary.json` → performance summary
